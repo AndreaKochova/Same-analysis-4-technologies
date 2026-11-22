@@ -1,0 +1,236 @@
+
+#Independently reproduce the Python Phase 1 analysis.
+#
+
+# final files:
+# results/r/summary.csv
+# results/r/hourly.csv
+# results/r/workingday.csv
+# results/r/weather.csv
+# results/r/monthly.csv
+# results/r/chart_hourly.png
+# results/r/chart_workingday.png
+# results/r/chart_monthly.png
+
+
+
+# Setup
+library(dplyr)     # For group_by(), summarise(), arrange(), and %>%
+library(ggplot2)   # For charts
+print(getwd())
+SOURCE <- "../data/hour.csv"    # The original dataset
+OUTPUT <- "../results/r"        # Where R will save results
+
+
+
+if (!file.exists(SOURCE)) {
+  stop("Cannot find data/hour.csv. Set the working directory to the project root.")
+}
+
+dir.create(OUTPUT, recursive = TRUE, showWarnings = FALSE)
+
+cat("Reading:", SOURCE, "\n")
+cat("Saving results in:", OUTPUT, "\n")
+
+
+# load and inspect
+
+df <- read.csv(SOURCE)
+
+head(df)                   # First six rows (pandas head() shows five)
+dim(df)                    # Dimensions: rows, columns
+str(df)                    # Column names and types
+colSums(is.na(df))         # Number of missing values per column
+
+
+
+# Validate
+
+row_count <- nrow(df)
+total_check <- sum(df$cnt)
+wrong_counts <- sum(df$cnt != df$casual + df$registered)
+duplicate_hours <- sum(duplicated(df[c("dteday", "hr")]))
+
+cat("Rows:", row_count, "\n")
+cat("Total rentals:", total_check, "\n")
+cat("Incorrect rental totals:", wrong_counts, "\n")
+cat("Duplicate date/hour rows:", duplicate_hours, "\n")
+
+# stopifnot() stops execution if any condition is FALSE.
+stopifnot(row_count == 17379)
+stopifnot(total_check == 3292679)
+stopifnot(wrong_counts == 0)
+stopifnot(duplicate_hours == 0)
+stopifnot(!anyNA(df))
+
+cat("PASS: Data-quality checks passed.\n")
+
+
+# Transform dates 
+
+
+# as.Date() converts that string into a proper Date value.
+df$dteday <- as.Date(df$dteday, format = "%Y-%m-%d")
+stopifnot(!anyNA(df$dteday))
+
+# format() creates labels like "2011-01" and "2012-01" → keeps the same month from different years separate.
+df$year_month <- format(df$dteday, "%Y-%m")
+
+head(df[c("dteday", "year_month", "hr", "cnt")])
+
+
+
+# analyse - 5 tables
+
+
+# R equivalents:
+# Python df["cnt"].sum()  -> R sum(df$cnt)
+# Python df["cnt"].mean() -> R mean(df$cnt)
+
+#  Overall results
+summary_table <- data.frame(
+  metric = c("total_rentals", "avg_hourly_demand"),
+  value = c(sum(df$cnt), mean(df$cnt))
+)
+
+# Average rentals grouped by hour.
+# %>% means "pass the result on to the next operation
+# group_by(hr) splits rows into hour groups (0..23)
+# summarise() calculates one row per group
+# .groups = "drop" removes the grouping after calculation
+hourly <- df %>%
+  group_by(hr) %>%
+  summarise(avg_rentals = mean(cnt), .groups = "drop") %>%
+  arrange(hr)
+
+#  Average rentals on working vs non-working days.
+workingday <- df %>%
+  group_by(workingday) %>%
+  summarise(avg_rentals = mean(cnt), .groups = "drop") %>%
+  arrange(workingday)
+
+#  Average rentals within each weather category.
+weather <- df %>%
+  group_by(weathersit) %>%
+  summarise(avg_rentals = mean(cnt), .groups = "drop") %>%
+  arrange(weathersit)
+
+# Total rentals for each year-month (sum, NOT mean).
+monthly <- df %>%
+  group_by(year_month) %>%
+  summarise(total_rentals = sum(cnt), .groups = "drop") %>%
+  arrange(year_month)
+
+print(summary_table)
+print(hourly)
+print(workingday)
+print(weather)
+print(monthly)
+
+
+#verify
+
+stopifnot(nrow(hourly) == 24)        # Hours 0..23
+stopifnot(nrow(workingday) == 2)     # Values 0 and 1
+stopifnot(nrow(monthly) == 24)       # 12 months x 2 years
+stopifnot(sum(monthly$total_rentals) == sum(df$cnt))
+
+# which.max() returns the POSITION of the largest value.
+# We then use this position to look up the corresponding hour.
+peak_position <- which.max(hourly$avg_rentals)
+peak_hour <- hourly$hr[peak_position]
+peak_average <- hourly$avg_rentals[peak_position]
+
+cat(sprintf("Peak average-demand hour: %02d:00\n", peak_hour))
+cat(sprintf("Average rentals at that hour: %.2f\n", peak_average))
+cat(sprintf("Overall mean per observed hour: %.2f\n", mean(df$cnt)))
+
+
+# Visualisation - 3 plots
+
+
+chart_hourly <- ggplot(hourly, aes(x = hr, y = avg_rentals)) +
+  geom_line() +
+  geom_point() +
+  scale_x_continuous(breaks = seq(0, 23, by = 2)) +
+  labs(
+    title = "Average Bike Rentals by Hour",
+    x = "Hour of day",
+    y = "Average rentals per observed hour"
+  ) +
+  theme_minimal()
+
+ggsave(file.path(OUTPUT, "chart_hourly.png"), chart_hourly,
+       width = 9, height = 4, dpi = 160)
+if (interactive()) print(chart_hourly)
+
+
+# factor() turns 0 and 1 into category labels for the chart
+# It does NOT alter the underlying exported results
+chart_workingday <- ggplot(
+  workingday,
+  aes(
+    x = factor(workingday,
+               levels = c(0, 1),
+               labels = c("Non-working (0)", "Working (1)")),
+    y = avg_rentals
+  )
+) +
+  geom_col() +
+  labs(
+    title = "Average Hourly Demand by Day Type",
+    x = "Day type",
+    y = "Average rentals per observed hour"
+  ) +
+  theme_minimal()
+
+ggsave(file.path(OUTPUT, "chart_workingday.png"), chart_workingday,
+       width = 6, height = 4, dpi = 160)
+if (interactive()) print(chart_workingday)
+
+# Year-month is text (a discrete x-axis). group = 1 tells
+# ggplot2 to connect all months into ONE continuous line
+chart_monthly <- ggplot(
+  monthly,
+  aes(x = year_month, y = total_rentals, group = 1)
+) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "Total Bike Rentals by Month",
+    x = "Year-month",
+    y = "Total rentals"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 65, hjust = 1))
+
+ggsave(file.path(OUTPUT, "chart_monthly.png"), chart_monthly,
+       width = 10, height = 4, dpi = 160)
+if (interactive()) print(chart_monthly)
+
+ 
+# Export
+#row.names = FALSE prevents R from adding a row-number column *
+
+write.csv(summary_table, file.path(OUTPUT, "summary.csv"), row.names = FALSE)
+write.csv(hourly, file.path(OUTPUT, "hourly.csv"), row.names = FALSE)
+write.csv(workingday, file.path(OUTPUT, "workingday.csv"), row.names = FALSE)
+write.csv(weather, file.path(OUTPUT, "weather.csv"), row.names = FALSE)
+write.csv(monthly, file.path(OUTPUT, "monthly.csv"), row.names = FALSE)
+
+cat("Saved files:\n")
+print(list.files(OUTPUT))
+
+
+# Sanity check if files were saved
+
+check_hourly <- read.csv(file.path(OUTPUT, "hourly.csv"))
+check_monthly <- read.csv(file.path(OUTPUT, "monthly.csv"))
+
+stopifnot(identical(names(check_hourly), c("hr", "avg_rentals")))
+stopifnot(identical(names(check_monthly), c("year_month", "total_rentals")))
+stopifnot(nrow(check_hourly) == 24)
+stopifnot(nrow(check_monthly) == 24)
+stopifnot(sum(check_monthly$total_rentals) == sum(df$cnt))
+
+cat("\nR Analysis Complete: 5 result tables and 3 charts saved.\n")
